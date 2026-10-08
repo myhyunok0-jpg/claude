@@ -10,6 +10,10 @@
  *        -> v6에서 "Process terminated"가 발생한 원인으로 추정되는
  *           Java 레벨에서 못 잡는 네이티브 self-kill 대응
  *  - [N2] strstr() 후킹으로 "frida"/"xposed"/"gum-js-loop" 등 문자열 탐지 무력화
+ *  - [FIX] Frida 17.x에서 Module.findExportByName(null, name) API가 제거됨
+ *          ("TypeError: not a function") -> resolveExport() 헬퍼로 교체
+ *          (Module.findGlobalExportByName / getGlobalExportByName / libc.so
+ *           모듈 직접 조회 순으로 폴백)
  *
  * 참고 출처(패턴/기법 출처, 검증은 각자 재확인):
  *  - https://github.com/NVISOsecurity/disable-flutter-tls-verification
@@ -27,11 +31,38 @@ console.log("[*] NIMO 루팅/위변조 + SSL 피닝 우회 v7 시작");
 // Part N. 네이티브 레벨 프로세스 종료 방어 (libc exit/_exit/abort/raise/kill)
 //   Java.perform 이전에 최대한 빨리 걸어야 anti-tamper native ctor보다 먼저 탄다.
 // ============================================================
+function resolveExport(name) {
+    // Frida 17.x: Module.findExportByName(null, ...)가 더 이상 함수가 아님.
+    // Module.getGlobalExportByName / Module.findGlobalExportByName 로 교체,
+    // 둘 다 없으면 libc.so 모듈에서 직접 찾는다 (구버전 호환 겸용).
+    try {
+        if (typeof Module.findGlobalExportByName === "function") {
+            return Module.findGlobalExportByName(name);
+        }
+    } catch (e) {}
+    try {
+        if (typeof Module.getGlobalExportByName === "function") {
+            return Module.getGlobalExportByName(name);
+        }
+    } catch (e) {}
+    var libcCandidates = ["libc.so", "libc.so.6"];
+    for (var i = 0; i < libcCandidates.length; i++) {
+        try {
+            var m = Process.getModuleByName(libcCandidates[i]);
+            if (m) {
+                var a = m.findExportByName(name);
+                if (a) return a;
+            }
+        } catch (e) {}
+    }
+    return null;
+}
+
 (function hookNativeTermination() {
     var targets = ["exit", "_exit", "abort", "raise", "kill"];
     targets.forEach(function (name) {
         try {
-            var addr = Module.findExportByName(null, name);
+            var addr = resolveExport(name);
             if (!addr) {
                 console.log("[N-] " + name + " export 못 찾음");
                 return;
@@ -62,7 +93,7 @@ console.log("[*] NIMO 루팅/위변조 + SSL 피닝 우회 v7 시작");
 // ============================================================
 (function hookStrstr() {
     try {
-        var strstrPtr = Module.findExportByName(null, "strstr");
+        var strstrPtr = resolveExport("strstr");
         if (!strstrPtr) {
             console.log("[N2-] strstr export 못 찾음");
             return;
